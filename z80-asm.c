@@ -9,8 +9,9 @@
 static FILE *input;
 
 static unsigned char memory[MAX_MEM];
-static unsigned short start,length;
-
+// Specific for Newbrain fomat (reversed datas)
+static unsigned char revmemory[MAX_MEM];
+static unsigned short start,length, datalength;
 
 unsigned char
 write_to_memory(unsigned short index, unsigned char a)
@@ -20,6 +21,9 @@ write_to_memory(unsigned short index, unsigned char a)
  return previous;
 }
 
+// For Newbrain tape
+char spaces[10]; // 10x0 + \n
+//
 
 static int
 take_line(char *line, int max_chars)
@@ -48,6 +52,7 @@ printf(
 "(c)1999-2004 Brainsoft  (Copyleft) 1999-2018\n"
 "Usage: %s [-w] [-h] [-l] [-f xx] [-c] <input file .asm> [<start address>[[:<length>]:<output file>]]\n"
 "Usage: %s [-w] [-h] [-l] [-f xx] [-c] <input file> [<start address>[:<length>]:<output file>] ...\n"
+"Usage: %s [-z] Newbrain binay file format\n"
 ,myname,myname);
 }
 
@@ -143,6 +148,7 @@ for (b=s=1;s<argc&&*argv[s]=='-';b++)
    else if (*(argv[s]+b)=='w')
    {  printf("Warnings switched on.\n");WARNINGS=1;
    }
+   else if (*(argv[s]+b)=='z') Z80=1;
    else if (*(argv[s]+b)=='l') LISTING=1;
    else if (*(argv[s]+b)=='c') cross=1;
    else if (*(argv[s]+b)=='f')
@@ -169,8 +175,12 @@ asm_init((unsigned char)a);
 a=0;
 set_compile_pass(1);
 set_start_address(0);
+
 while (!a && !take_line(line,511))
+{
   a= compile(line);
+}
+
 if (a==8) a=0;
 if (!a)
   a=check_cond_nesting();
@@ -180,9 +190,13 @@ if (!a)
  {asm_close();fprintf(stderr,"can't rewind input file \"%s\".\n",argv[s]);return 2;}
  set_compile_pass(2);
  set_start_address(0);
- while (!a && !take_line(line,511))
-   a= compile(line);
+
+ while (!a && !take_line(line,511)) 
+   {
+      a= compile(line);
+   }
  }
+
 if (a==8) a=0;
 fclose(input);
 if (s+1 == argc)
@@ -205,9 +219,104 @@ if (!a)
          fprintf(stderr,"Error: Can't open output file \"%s\".\n",txt);
          return 1;
       }
-      write_header(output,start);
-      if (length || generated_bytes() && highest_address() >= start)
-         fwrite(memory+start,1,length?length:highest_address()+1-start,output);
+      if (!Z80){
+         write_header(output,start);
+      }
+      else {
+         datalength = length?length:highest_address()+1-start;
+
+         unsigned char title[256];
+         //out((highest_address() - lowest_address() + 1) >> 8);
+         //out((highest_address() - lowest_address() + 1) & 255);
+
+//printf("%u", (highest_address() - lowest_address() + 1));return 1; // 28
+
+         //printf("%d ", (highest_address() - lowest_address() + 1) >> 8);
+         //printf("%d ", (highest_address() - lowest_address() + 1) & 255);
+      }
+
+      if (length || generated_bytes() && highest_address() >= start) {
+         if (!Z80){
+            fwrite(memory+start,1,length?length:highest_address()+1-start,output);
+         }
+         else {
+            // Newbrain format - reverse data memory
+
+            // 3 caractères :  0 tailletitre 0 + strlen(titre) + 81(H) + 84(H) + 2 (nbblocs?) + 10
+            // Création du bloc titre
+            write_8bits(output, 0, 1);
+
+            // si > 0 titre
+            write_8bits(output, strlen("TEST    "), 2);
+            write_string(output, "TEST    \n");
+
+            write_8bits(output, 0x81, 1); // toujours 81(H)
+
+            write_8bits(output, 0x84, 1); // comment est-ce calculé ? taille du buffer ?
+
+            write_8bits(output, 0x2, 1); // comment est-ce calculé ? nombre de blocs ?
+
+            // 10 prochains éléments sont à 0 par défaut
+            memset(spaces, 0, 10);
+            fwrite(spaces,1, sizeof(spaces) ,output);
+
+            // Longueur des datas + ?
+            // printf("%d", highest_address() - lowest_address() + 1); 27 datas + 2 = 29 + 2 = 31 + 2 = 33 + 1(01) = 34 - 22(H)
+            int size = highest_address() - lowest_address() + 1 + 2 + 2 + 2 + 1; 
+            write_8bits(output, size, 2);
+
+            // Valeur de la directive ORG en entête du code source
+            write_16bits(output, lowest_address());
+            //revmemory[bloctitre+3] = 62; // 3E
+            //revmemory[bloctitre+4] = 123; // 7B 
+
+            // datas reverse
+            for (int boucle=datalength-1;boucle >= lowest_address(); boucle--) {
+               revmemory[datalength - boucle - 1] = memory[boucle];
+            }
+            // Ecriture des datas
+           fwrite(revmemory+start,1, highest_address() - lowest_address() + 1 ,output);
+
+            // Taille des données utiles du bloc
+            write_16bits(output, (highest_address() - lowest_address() + 1)); // 0 1B - 27
+
+            // Valeur de la directive ORG
+            write_16bits(output, lowest_address()); // 3E 7B
+
+
+// E1 DD E1 FD 31     ...  3E 7B  21 E5  FD  E5  DD  0 42 0 41 0 1B 3E 7B  01 41 8E  0E
+// 225 221 225 253 49 ...  62 123 33 229 253 229 221 0 66 0 65 0 27 62 123 1  65 142 14
+            // Numéro du bloc ?
+            write_8bits(output, 1, 1); // 01
+
+            // Quoi mettre exactement surtout pour les 2 derniers bytes qui varie en fonction des données du code
+            // 41(H) 8E(H) 0E(H) - 65 142 14 // 41 59 0F - 65 89 15 // 41 23 10 - 65 35 16
+            // ORG écart de 15 entre 15995 et 16000, écart de 3 entre 16000 et 16001
+            // Si ORG 0 => 0E(H) 14(D), si ORG 1 => 11(H) 17(D) soit un écart de 3, ORG 2 => 14(H) 20(D) soit un écart de 3, ...
+
+            // Formule a appliquer en conservant le poids fort (2eme byte du résultat)
+            // valeur du ORG * 3 + 14 = 
+
+            write_8bits(output, 0x41, 1); // toujours 41(H) ?
+
+            // 15995 => 58(H) - 88(D) //  16000 => 67(H) - 103(D) // 16001 => 6A(H) - 106(D)
+            // 1 > 86   134
+            // 255 > 82 130
+            // 256 > 86 134
+            // 510(2x255) > 82 130 
+            // 511(256+255) > 84 132
+            // 512(2x256) > 88 136
+            // 765(3x255) > 82 130
+            // 768(3x256) > 8A 138
+            write_8bits(output, 0x8E, 1); // Kesako ??? 58(H) pour ORG 15995 - 67(H) pour 16000 soit un écart de 15
+            
+            write_8bits(output, 0x0E, 1); // Nombre de lignes de codes (de ORG inclus jusqu'au END exclus) => TODO  - A CALCULER
+
+            // 9 blocs à 0 - on tente sans pour voir
+//            fwrite(newbrain_title.spaces,1, sizeof(newbrain_title.spaces) -1 ,output);
+
+         }
+      }
       fclose(output);
    }
 }
